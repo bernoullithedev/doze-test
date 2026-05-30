@@ -15,9 +15,9 @@
 
 1. *“This is Doze narrowed to the demo surface: Telegram ingress, Vertex tool calling, Supermemory shared with our production Doze project, and Outdoze staging instead of browser automation.”*
 2. *“Spectrum/iMessage is out of scope for this hackathon — v0 is Telegram-only so we ship the agent and Outdoze story without bridge work.”*
-3. *“Watch it remember you, manage a list, search products via Perplexity, pull places from Outdoze, and run the fun tools (poster, restaurant picker, fortune, playlist, outfit roast).”*
+3. *"Watch it remember you, manage a list, search products via Perplexity, pull places from Outdoze (with a booking phone), confirm with you, place a **Vapi voice call** to book, and run the fun tools (poster, restaurant picker, fortune, playlist, outfit roast)."*
 
-**Non-goals for v0:** Stagehand `browse-website` / DoorDash checkout flows, Partiful, Vapi calls, Stripe payments, prod Outdoze traffic, **Spectrum/iMessage ingress** (any setup, adapters, or env for the hackathon).
+**Non-goals for v0:** Stagehand `browse-website` / DoorDash checkout flows, Partiful, Stripe payments, prod Outdoze traffic, **Spectrum/iMessage ingress** (any setup, adapters, or env for the hackathon). *(Vapi booking calls are in scope — see [Vapi booking calls](#vapi-booking-calls).)*
 
 ---
 
@@ -85,6 +85,26 @@ Existing Outdoze code reference: `app/api/places/route.ts` + `lib/mockData.ts` (
 
 ---
 
+
+## Vapi booking calls
+
+When Outdoze returns a **`phone`** (or **`bookingPhone`**) on place detail / checkout-options, the agent can complete a reservation by voice instead of browser checkout.
+
+**Flow:**
+
+1. User asks to book or reserve → **`searchOutdoze`** (search → detail → optional `checkout-options`).
+2. Response includes venue **`phone`** / **`bookingPhone`** (from staging mock API — see outdoze `TODO.md`).
+3. Agent summarizes slot/party size and **asks user to confirm** before calling (Telegram).
+4. On confirm → **`makePhoneCall`** (`doze/src/tools/make-call.ts`): passes `phoneNumber` (venue, for context), `purpose`, and brief `questions[]`.
+5. **`vapi-client.ts`** creates outbound call via Vapi REST API, polls until `ended`, filters transcript (regex + optional Claude Haiku), returns essential booking info to the user in chat.
+
+**Reference implementation:** private **`bernoullithedev/doze`** — `src/tools/make-call.ts`, `src/vapi-client.ts`, exported as **`makePhoneCall`** in `src/tools/index.ts`. Sunday monorepo `services/agent` has a parallel copy for MCP patterns only.
+
+**Demo / safety:** doze hardcodes the **dialed** number to a test recipient (`+19095069035` in `vapi-client.ts`); `phoneNumber` tool arg is context for the model. Without env vars, tool runs in **stub mode** (returns what it would ask).
+
+**System prompt:** Instruct agent to prefer phone booking when Outdoze exposes a number and user wants a human reservation; never call without explicit user confirmation.
+
+
 ## Tool roster (v0)
 
 Register incrementally in `src/tools/index.ts` (one commit per tool where possible).
@@ -98,6 +118,7 @@ Register incrementally in `src/tools/index.ts` (one commit per tool where possib
 | **`manageList`** | `doze/src/tools/manage-list.ts` | In-memory or persisted list CRUD per sender. |
 | **`searchProducts`** | `doze/src/tools/search-products.ts` | Perplexity Sonar — **kept**; general web/product research when Outdoze does not cover the question. |
 | **`searchOutdoze`** | **New** (`outdoze-client.ts`) | Query staging Outdoze: search places, get place by id/slug, checkout/options mock. |
+| **`makePhoneCall`** | `doze/src/tools/make-call.ts` + `doze/src/vapi-client.ts` | Outbound Vapi voice call for reservations; uses venue `phone` from Outdoze after user confirms. Stub if `VAPI_*` unset. |
 
 ### Fun (hackathon)
 
@@ -109,14 +130,13 @@ Register incrementally in `src/tools/index.ts` (one commit per tool where possib
 | **`moodPlaylist`** | Stub playlist for mood string |
 | **`roastOutfit`** | Multimodal via Gemini user content + attachments |
 
-**Removed / not ported:** `suggestPlan` as primary demo path (optional later). No `browse-website`, `make-call`, `process-payment`, Partiful tools, `create-event-partiful`.
+**Removed / not ported:** `suggestPlan` as primary demo path (optional later). No `browse-website`, `process-payment`, Partiful tools, `create-event-partiful`.
 
 ### Explicitly EXCLUDED
 
 - `browse-website` / Stagehand / Browserbase  
 - `browseAndCheckout` / DoorDash automation  
 - Partiful event flows  
-- Vapi `make-call`  
 - `process-payment` / Stripe  
 - Generic browse fallback when Outdoze + `searchProducts` suffice  
 
@@ -133,13 +153,15 @@ Register incrementally in `src/tools/index.ts` (one commit per tool where possib
 | `src/tools/index.ts` | Tool registration |
 | `src/tools/save-memory.ts`, `search-memory.ts`, `manage-list.ts`, `search-products.ts` | Core tools |
 | `src/tools/generate-poster.ts` | Fun + attachments |
+| `src/tools/make-call.ts` | `makePhoneCall` tool (booking intent) |
+| `src/vapi-client.ts` | Vapi REST client, poll, transcript filter |
 | `src/ingress/telegram-adapter.ts` | Telegram mapping |
 | `src/ingress/spectrum-adapter.ts` | **Future** - not ported for hackathon (see ingress section). |
 | `src/index.ts` | Trim to Telegram + Express routes; omit WhatsApp |
 | `src/prompt/*`, `src/attachments.ts` | If multimodal / multi-bubble replies needed |
 | `src/prompts/system.ts` | Shorten; document Outdoze + Telegram |
 
-**Do not port:** `browse-website.ts`, `make-call.ts`, `process-payment.ts`, `create-event-partiful.ts`, `spectrum-adapter.ts`, Spectrum/iMessage bootstrap.
+**Do not port:** `browse-website.ts`, `process-payment.ts`, `create-event-partiful.ts`, `spectrum-adapter.ts`, Spectrum/iMessage bootstrap.
 
 **Sunday monorepo:** Reference only for bridge/agent MCP patterns — **not** ported for this repo.
 
@@ -197,7 +219,16 @@ chore: document env in .env.example
 - [ ] `manageList`  
 - [ ] `searchProducts`  
 - [ ] `searchOutdoze` (staging base URL)  
+- [ ] `makePhoneCall` + `vapi-client` (port from doze; wire after Outdoze returns `phone`)  
 - [ ] Fun tools: poster, pickRestaurant, fortuneCookie, moodPlaylist, roastOutfit
+
+### Phase 4b — Vapi booking
+
+- [ ] Port `make-call.ts` + `vapi-client.ts` from doze  
+- [ ] Register `makePhoneCall` in `src/tools/index.ts`  
+- [ ] Document confirm-before-call in `src/prompts/system.ts`  
+- [ ] Smoke: stub mode without `VAPI_*`; optional live call with keys  
+- [ ] E2E: `searchOutdoze` → detail with `phone` → user confirms → call → summary in Telegram  
 
 ### Phase 5 — Outdoze staging
 
@@ -228,6 +259,9 @@ Secrets live in **`.env.local`** (gitignored) and optionally `.env` for local ov
 | `OUTDOZE_API_BASE_URL` | Yes | **Staging** base URL (no trailing slash); not prod marketing site |
 | `OUTDOZE_API_KEY` | Optional | If staging routes add auth |
 | `ARTIFACT_DIR` | Optional | Poster output, default `/tmp/doze-test-artifacts` |
+| `VAPI_API_KEY` | Optional (live calls) | Vapi dashboard API key; omit for stub mode |
+| `VAPI_PHONE_NUMBER_ID` | Optional (live calls) | Vapi outbound number ID paired with `VAPI_API_KEY` |
+| `ANTHROPIC_API_KEY` | Optional | Used by `vapi-client` intelligent transcript filter (Haiku); regex fallback works without it |
 
 Never commit `.env`, `.env.local`, or API keys.
 
@@ -239,6 +273,7 @@ Never commit `.env`, `.env.local`, or API keys.
 2. **Say:** “Remember my name is Alex and I hate crowded spots.” → **`saveMemory`**.  
 3. **Ask:** “Add sunscreen to my beach list.” → **`manageList`**.  
 4. **Ask:** “Find rooftop lounges in Accra under ₵200” → **`searchOutdoze`** (staging).  
+4b. **Ask:** "Book Afrikiko Saturday 7pm, party of 2" → detail/`checkout-options` shows **`phone`** → agent confirms → **`makePhoneCall`** → booking summary in chat (stub or live Vapi).  
 5. **Ask:** “What’s trending for date night restaurants in East Legon?” → **`searchProducts`** if Outdoze slice is thin.  
 6. **Ask:** “We can’t pick dinner — surprise us, Japanese vibe.” → **`pickRestaurant`**.  
 7. **Ask:** “Poster for ‘Outdoze Night’ neon vibe.” → **`generatePoster`**, send image in chat.  
@@ -265,6 +300,7 @@ Backup: **`moodPlaylist`**, local `POST /api/chat` UI if Telegram flakes.
 
 - Telegram ingress delivers messages to `runAgentTurn` and replies in-thread.  
 - Core tools + Outdoze HTTP tool demonstrably invoked in demo.  
+- Optional demo beat: Outdoze `phone` → confirmed **`makePhoneCall`** (stub or Vapi).  
 - Supermemory reads/writes use **doze’s** Supermemory project.  
 - Commit farm history shows incremental features.  
 - No secrets in git; Telegram-only ingress defines “done.” for v0.
@@ -278,4 +314,4 @@ Backup: **`moodPlaylist`**, local `POST /api/chat` UI if Telegram flakes.
 
 ---
 
-*Last updated: Telegram-only ingress for hackathon v0; Spectrum out of scope; Outdoze staging HTTP; Supermemory shared with doze; browse disabled; Perplexity search kept.*
+*Last updated: Telegram-only ingress; Spectrum out of scope; Outdoze staging HTTP + booking phone; Vapi `makePhoneCall` in scope; Supermemory shared with doze; browse disabled; Perplexity search kept.*
