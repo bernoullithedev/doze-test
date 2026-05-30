@@ -1,272 +1,253 @@
 # doze-test — Hackathon build plan
 
-> **Repo:** `bernoullithedev/doze-test` (public, separate from the Sunday monorepo)  
-> **Stack decision:** Express HTTP server + Vercel AI SDK + Google Vertex (Gemini). **Not** Next.js.  
-> **Workflow:** **Commit farm** — one conventional commit per mini feature (see [Commit farm](#commit-farm-guidelines)).
+> **Repo:** `bernoullithedev/doze-test` (public, separate from Sunday / private **doze**)  
+> **Stack:** Express HTTP server + Vercel AI SDK + Google Vertex (Gemini), ported from **doze** (`bernoullithedev/doze`).  
+> **Places / checkout data:** Direct HTTP to **Outdoze** staging API (no Stagehand, no prod `outdoze.com` for demo).  
+> **Workflow:** **Commit farm** — one conventional commit per logical slice (see [Commit farm](#commit-farm-guidelines)).
 
 ---
 
 ## Project goal & demo narrative
 
-**What we are building:** A minimal **Doze-style concierge** you can demo in a browser in under a minute: type a message, the agent reasons with **~7 tools** (mix of practical + fun), optionally returns **generated images**, and remembers simple facts for the session or via lightweight memory.
+**What we are building:** A **Doze-style concierge** reachable on **Telegram** for the hackathon demo, with the same agent loop and core tool patterns as doze, plus **Outdoze** for venue discovery and checkout-style info. Optional browser chat UI remains useful for local debugging.
 
 **Story for judges:**
 
-1. *“This is Doze stripped to the hackathon essentials — same agent loop patterns as our production codebase, but no iMessage bridge, no payments, no browser checkout.”*
-2. *“Vertex Gemini drives tool calling through the Vercel AI SDK — one Express server, one chat page.”*
-3. *“Watch it manage a list, remember your name, pick a restaurant when we’re indecisive, generate a poster for tonight, and roast an outfit if you upload a photo.”*
+1. *“This is Doze narrowed to the demo surface: Telegram ingress, Vertex tool calling, Supermemory shared with our production Doze project, and Outdoze staging instead of browser automation.”*
+2. *“We deliberately skipped Spectrum/iMessage for v0 — adapter code can land later without blocking the demo.”*
+3. *“Watch it remember you, manage a list, search products via Perplexity, pull places from Outdoze, and run the fun tools (poster, restaurant picker, fortune, playlist, outfit roast).”*
 
-**Non-goals for v0:** Spectrum/iMessage ingress, Telegram/WhatsApp adapters, Stagehand browse/checkout, Vapi calls, Stripe payments, Partiful events, full Supermemory production wiring.
+**Non-goals for v0:** Stagehand `browse-website` / DoorDash checkout flows, Partiful, Vapi calls, Stripe payments, prod Outdoze traffic, Spectrum/iMessage **enabled** in production config.
+
+---
+
+## Ingress: Telegram vs Spectrum (resolved)
+
+| Channel | v0 status | Notes |
+|---------|-----------|--------|
+| **Telegram** | **Required** | Port `doze/src/ingress/telegram-adapter.ts` + Chat SDK `createTelegramAdapter` polling from `doze/src/index.ts`. Demo script assumes Telegram DMs. |
+| **Spectrum / iMessage** | **Post-v0 / optional** | User initially asked for **both** channels, but also selected **`skip_spectrum`** for spectrum setup. **Resolution:** do **not** block the build on Spectrum. Copy `spectrum-adapter.ts` and Spectrum bootstrap into a feature-flagged or commented path (`ENABLE_SPECTRUM=false` default) so it can be enabled later without shipping iMessage for the hackathon. |
+
+**Open question (documented):** If judges expect iMessage, clarify that v0 is Telegram-first; Spectrum is staged behind env flag.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────┐     POST /api/chat      ┌──────────────────────────────────┐
-│  public/    │  JSON { message, ... }  │  Express (src/index.ts)          │
-│  index.html │ ──────────────────────► │  • static files                  │
-│  (chat UI)  │ ◄── JSON + attachments  │  • POST /api/chat → runAgentTurn │
-└─────────────┘                         │  • GET /health                   │
-                                        └──────────────┬───────────────────┘
-                                                       │
-                                                       ▼
-                                        ┌──────────────────────────────────┐
-                                        │  src/agent.ts                    │
-                                        │  streamText + tools + Vertex     │
-                                        └──────────────┬───────────────────┘
-                                                       │
-                       ┌───────────────────────────────┼───────────────────────────────┐
-                       ▼                               ▼                               ▼
-              src/tools/*.ts                   src/prompts/system.ts            src/memory.ts
-              (Zod + tool())                   (persona + tool hints)           (in-memory Map v0)
+┌──────────────────┐   webhook / polling    ┌─────────────────────────────────────┐
+│  Telegram        │ ─────────────────────► │  Express (src/index.ts)             │
+│  (Chat SDK)      │                        │  • GET /health                      │
+└──────────────────┘                        │  • POST /api/chat (debug / load test) │
+                                            │  • ingress → debounce → agent       │
+┌──────────────────┐   optional local       └──────────────────┬──────────────────┘
+│  public/         │   POST /api/chat                          │
+│  index.html      │ ────────────────────────────────────────────┤
+└──────────────────┘                                             ▼
+                                        ┌─────────────────────────────────────┐
+                                        │  src/agent.ts                       │
+                                        │  streamText + tools + Vertex        │
+                                        └──────────────────┬──────────────────┘
+                                                           │
+         ┌─────────────────────────────┬───────────────────┼───────────────────┐
+         ▼                             ▼                   ▼                   ▼
+  src/tools/*.ts              src/prompts/system.ts   src/memory.ts      OUTDOZE_API_BASE_URL
+  Supermemory (doze project)  (persona + tools)     (supermemory pkg)   staging HTTP JSON
 ```
 
 ### Express app structure (target)
 
 | Path | Purpose |
 |------|---------|
-| `src/index.ts` | Create app, `express.json()`, serve `public/`, mount routes, listen on `SERVER_PORT` (default `4000`). |
-| `src/routes/chat.ts` | `POST /api/chat` — validate body, call `runAgentTurn`, return `AgentChatResponse`. |
-| `src/agent.ts` | `runAgentTurn(request)` — `streamText` with Vertex model, registered tools, step limit. |
-| `src/env.ts` | Load `.env` locally only (mirror doze). |
-| `src/types.ts` | `AgentChatRequest`, `AgentChatResponse`, `ConversationTurn`, attachments. |
-| `public/index.html` | Single-page chat: message input, optional image upload (base64 or multipart), display replies + image URLs. |
-| `src/tools/index.ts` | Export `tools` object for AI SDK. |
-| `src/attachments.ts` | Queue generated images for response payload (pattern from doze). |
+| `src/index.ts` | Express app, Telegram bot init, debouncer/session handler (trimmed from doze), optional static `public/`. |
+| `src/routes/chat.ts` | `POST /api/chat` — same contract as doze for local UI / tests. |
+| `src/agent.ts` | `runAgentTurn` — port from `doze/src/agent.ts`. |
+| `src/ingress/telegram-adapter.ts` | Map Telegram payloads → `IncomingChatMessage`. |
+| `src/ingress/spectrum-adapter.ts` | **Copied, disabled by default** (`ENABLE_SPECTRUM`). |
+| `src/env.ts` | Load `.env` / `.env.local` locally only. |
+| `src/memory.ts` | **Supermemory** — same API key / project as doze (`SUPERMEMORY_API_KEY`). |
+| `src/tools/outdoze-client.ts` | `fetch` wrapper for staging Outdoze routes (see outdoze `todo.md`). |
+| `public/index.html` | Optional browser chat for dev. |
 
-**Chat contract (v0):**
-
-```json
-POST /api/chat
-{
-  "message": "string",
-  "sender": "demo-user",
-  "history": [{ "role": "user"|"assistant", "content": "..." }],
-  "attachments": [{ "fileName": "photo.jpg", "base64": "..." }]
-}
-```
-
-Response mirrors doze `AgentChatResponse`: `{ "response": "...", "attachments"?: [...], "messages"?: [...] }`.
+**Chat contract:** Same as doze — `AgentChatRequest` / `AgentChatResponse` in `src/types.ts`.
 
 ---
 
-## Stack & dependencies
+## Outdoze API integration
 
-Mirror **doze** (`bernoullithedev/doze` private) where possible; drop ingress and heavy integrations.
+- **Environment:** `OUTDOZE_API_BASE_URL` → **staging** deployment (placeholder until Vercel preview URL is pinned), e.g. `https://<staging-host>` — **not** production `https://outdoze.com` for demo traffic.
+- **Auth:** v0 mock routes on Outdoze repo are public GET JSON; add `OUTDOZE_API_KEY` only if staging later requires it.
+- **Agent tool:** `searchOutdoze` (alias `browseOutdoze` in docs) — HTTP client that calls Outdoze App Router handlers; returns place lists, place detail, and checkout summary JSON for the model. **No** Stagehand sessions.
+- **Implementation tracker:** Private repo `bernoullithedev/outdoze` — see **`todo.md`** there for mock routes to add or stabilize for doze-test.
 
-| Package | Role |
-|---------|------|
-| `express` | HTTP server (user requirement). |
-| `ai` | `streamText`, `tool`, `stepCountIs`. |
-| `@ai-sdk/google-vertex` | `createVertex`, Gemini model. |
-| `zod` | Tool input schemas. |
-| `dotenv` | Local env loading via `src/env.ts`. |
-| `tsx` | Dev watch (`pnpm dev`). |
-| `typescript` | Strict TS, ESM (`"type": "module"`). |
-
-**Optional v0.1:** `supermemory` only if time — otherwise **`src/memory.ts`** as in-process `Map<sender, string[]>` with `saveMemory` / `searchMemory` tools wrapping it.
-
-**Explicitly not in v0:** `@browserbasehq/stagehand`, `spectrum-ts`, `chat` adapters, `@ai-sdk/amazon-bedrock` (Sunday WIP server uses Bedrock in places; **this demo is Vertex-only**).
+Existing Outdoze code reference: `app/api/places/route.ts` + `lib/mockData.ts` (`fetchPlaces` pagination).
 
 ---
 
-## Tool roster (final ~7)
+## Tool roster (v0)
 
-Tools the bot **will** register in v0. Each tool = one commit farm milestone when implemented.
+Register incrementally in `src/tools/index.ts` (one commit per tool where possible).
 
-### Practical (from doze patterns)
+### Practical (from doze)
 
-| Tool | Source inspiration | Demo behavior |
-|------|-------------------|---------------|
-| **`manageList`** | `doze/src/tools/manage-list.ts` | CRUD a named list (“groceries”, “packing”) in memory; agent adds/removes/items. |
-| **`saveMemory`** | `doze/src/tools/save-memory.ts` | Persist a short fact keyed by `sender` (in-memory store v0). |
-| **`searchMemory`** | `doze/src/tools/search-memory.ts` | Keyword / simple match over saved facts for `sender`. |
-| **`suggestPlan`** | `doze/src/tools/save-plan.ts` (simplified) | **Mock** evening plan: returns structured JSON (dinner idea, activity, vibe) without external APIs — fast and reliable on stage. |
+| Tool | Source | Behavior |
+|------|--------|----------|
+| **`saveMemory`** | `doze/src/tools/save-memory.ts` | Supermemory via `src/memory.ts`, **same project/API key as doze**. |
+| **`searchMemory`** | `doze/src/tools/search-memory.ts` | Supermemory search scoped by sender tag. |
+| **`manageList`** | `doze/src/tools/manage-list.ts` | In-memory or persisted list CRUD per sender. |
+| **`searchProducts`** | `doze/src/tools/search-products.ts` | Perplexity Sonar — **kept**; general web/product research when Outdoze does not cover the question. |
+| **`searchOutdoze`** | **New** (`outdoze-client.ts`) | Query staging Outdoze: search places, get place by id/slug, checkout/options mock. |
 
-### Fun (hackathon demo)
+### Fun (hackathon)
 
-| Tool | Behavior |
-|------|----------|
-| **`generatePoster`** | Vertex image generation — event title + vibe → PNG saved under `/tmp/doze-test-artifacts`, URL returned in attachments. Port logic from `doze/src/tools/generate-poster.ts`. |
-| **`pickRestaurant`** | Random picker from a curated list (city + cuisine filters); optional `rollDice` sub-action using `Math.random()` — “we can’t decide, pick for us.” |
-| **`fortuneCookie`** | Returns a whimsical fortune + “lucky number”; zero external deps — good filler between heavier tool calls. |
-| **`moodPlaylist`** | **Stub:** given mood string, returns a fake 5-track playlist (title + artist strings) — demonstrates personality without Spotify OAuth. |
-| **`roastOutfit`** | Text-only roast from user message + optional **image attachment** (multimodal user content in agent); no separate vision API if Gemini sees the image in the message. Keep tone playful, not mean — system prompt guardrails. |
+| Tool | Source / notes |
+|------|----------------|
+| **`generatePoster`** | `doze/src/tools/generate-poster.ts` |
+| **`pickRestaurant`** | Curated list + dice / filters (can complement Outdoze results) |
+| **`fortuneCookie`** | Lightweight stub |
+| **`moodPlaylist`** | Stub playlist for mood string |
+| **`roastOutfit`** | Multimodal via Gemini user content + attachments |
 
-**Collage (`generateCollage`)** — stretch goal after poster works; copy `doze/src/tools/generate-collage.ts` + `setAvailablePhotos` hook from `agent.ts` if time.
+**Removed / not ported:** `suggestPlan` as primary demo path (optional later). No `browse-website`, `make-call`, `process-payment`, Partiful tools, `create-event-partiful`.
 
-### Explicitly EXCLUDED from v0
+### Explicitly EXCLUDED
 
-- `browse-website` / Stagehand checkout  
-- `make-call` / Vapi  
-- `process-payment`  
-- `create-event-partiful`, full Partiful flow  
-- `search-products` (Perplexity) — optional phase 2  
-- Spectrum / iMessage / bridge pipeline (`sunday/services/bridge`)  
-- Full Telegram/WhatsApp ingress from doze `index.ts`
+- `browse-website` / Stagehand / Browserbase  
+- `browseAndCheckout` / DoorDash automation  
+- Partiful event flows  
+- Vapi `make-call`  
+- `process-payment` / Stripe  
+- Generic browse fallback when Outdoze + `searchProducts` suffice  
 
 ---
 
-## What to copy from doze vs Sunday
+## What to copy from doze (copy map)
 
-### Prefer **doze** (primary template)
+| doze path | doze-test |
+|-----------|-----------|
+| `src/agent.ts` | Agent loop, Vertex model env |
+| `src/env.ts` | Env bootstrap |
+| `src/types.ts` | Chat types |
+| `src/memory.ts` | Supermemory client + sender tag |
+| `src/tools/index.ts` | Tool registration |
+| `src/tools/save-memory.ts`, `search-memory.ts`, `manage-list.ts`, `search-products.ts` | Core tools |
+| `src/tools/generate-poster.ts` | Fun + attachments |
+| `src/ingress/telegram-adapter.ts` | Telegram mapping |
+| `src/ingress/spectrum-adapter.ts` | Copy only; **disabled** v0 |
+| `src/index.ts` | Trim to Telegram + Express routes; omit WhatsApp |
+| `src/prompt/*`, `src/attachments.ts` | If multimodal / multi-bubble replies needed |
+| `src/prompts/system.ts` | Shorten; document Outdoze + Telegram |
 
-| doze path | Use in doze-test |
-|-----------|------------------|
-| `src/env.ts` | Dotenv bootstrap before other imports. |
-| `src/agent.ts` | Vertex + `streamText` + `tools` + `runAgentTurn` shape. |
-| `src/types.ts` | Request/response types. |
-| `src/tools/index.ts` | Tool registration pattern. |
-| `src/tools/manage-list.ts` | List tool (trim deps). |
-| `src/tools/save-memory.ts`, `search-memory.ts` | Adapt to in-memory backend if skipping Supermemory. |
-| `src/tools/generate-poster.ts`, `generate-collage.ts` | Image tools + artifact paths. |
-| `src/attachments.ts` | Drain attachments into HTTP response. |
-| `src/prompts/system.ts` | Persona (shorten for demo). |
-| `src/prompt/prepare-context.ts`, `images.ts`, `parse-output.ts` | If multimodal + multi-bubble replies needed. |
-| `src/memory.ts` | Reference for Supermemory — swap to Map for demo. |
+**Do not port:** `browse-website.ts`, `make-call.ts`, `process-payment.ts`, `create-event-partiful.ts`, full Spectrum provider boot unless `ENABLE_SPECTRUM=true`.
 
-### Reference **Sunday** monorepo (context only)
-
-| Sunday path | Notes |
-|-------------|--------|
-| `services/agent/` | Legacy **Claude Agent SDK** + MCP tools — **do not port** for this demo. |
-| `services/server/` | WIP AI SDK server; similar shape to doze but **Bedrock** appears in agent paths — use doze’s Vertex wiring instead. |
-| `services/bridge/` | iMessage pipeline — **out of scope** (avoids “is this just iMessage?” suspicion). |
-| `packages/shared/` | Shared Zod config types — optional copy of minimal chat types only. |
-
-**Rule:** Copy **ideas and file structure**, not `.env` or API keys. Re-implement minimal slices in doze-test with fresh commits.
+**Sunday monorepo:** Reference only for bridge/agent MCP patterns — **not** ported for this repo.
 
 ---
 
 ## Commit farm guidelines
 
-**Policy:** After every **mini feature** that compiles and runs (or adds an isolated tool test), commit immediately. Keeps demo bisectable and shows velocity to judges.
+One conventional commit per logical change; keep `main` bisectable.
 
-**Mini feature examples:**
-
-- scaffold Express + health route  
-- add `env.ts` + `.env.example`  
-- add `POST /api/chat` stub  
-- wire Vertex + echo agent  
-- add `manageList` tool only  
-- add static chat UI  
-- one fun tool per commit  
-
-**Conventional commit format:**
+**Examples:**
 
 ```
-feat(tools): add manageList in-memory list CRUD
-feat(server): expose POST /api/chat with Zod validation
-feat(ui): minimal public/index.html chat client
-feat(agent): wire Vertex gemini flash via @ai-sdk/google-vertex
-feat(tools): add fortuneCookie stub
-fix(agent): drain image attachments into response
-docs: update plan phase checkboxes
-chore: add .env.example without secrets
+docs: revise plan for doze port, telegram, outdoze API
+feat(ingress): wire Telegram polling adapter
+feat(tools): add searchOutdoze HTTP client
+feat(memory): wire Supermemory same as doze
+feat(tools): port searchProducts Perplexity
+chore: document env in .env.example
 ```
 
-**Do not** batch unrelated tools in one commit during the hackathon build night.
+**Do not** batch unrelated tools in a single commit during build night.
 
 ---
 
 ## Implementation phases
 
-### Phase 0 — Repo & plan
+### Phase 0 — Docs & env
 
-- [x] Public GitHub repo `doze-test`  
-- [x] `plan.md` + minimal `README.md`  
-- [ ] `.gitignore` (node_modules, .env, artifacts)
+- [x] Public `doze-test` repo  
+- [x] `plan.md` (this file)  
+- [ ] `.env.example` aligned with env table  
+- [ ] `README.md` run instructions (Telegram + optional UI)
 
-### Phase 1 — Skeleton (commits 1–4)
+### Phase 1 — Skeleton
 
-- [ ] `package.json`, `tsconfig.json`, `pnpm` or `npm` lock  
+- [ ] `package.json`, `tsconfig`, strict TS  
 - [ ] `src/env.ts`, `src/index.ts`, `GET /health`  
-- [ ] `src/types.ts`, stub `runAgentTurn`  
-- [ ] `.env.example` documented below  
+- [ ] `src/types.ts`, stub `runAgentTurn`
 
-### Phase 2 — Agent core (commits 5–7)
+### Phase 2 — Agent core
 
-- [ ] Vertex client in `src/agent.ts`  
-- [ ] `src/prompts/system.ts` (Doze voice, safety, tool usage)  
-- [ ] Register tools incrementally in `src/tools/index.ts`  
-- [ ] `POST /api/chat` end-to-end text-only  
+- [ ] Vertex in `src/agent.ts`  
+- [ ] `src/prompts/system.ts`  
+- [ ] Supermemory in `src/memory.ts` (doze-equivalent key)  
+- [ ] `POST /api/chat` text-only E2E
 
-### Phase 3 — Tools (one commit each)
+### Phase 3 — Ingress
 
-- [ ] `manageList`  
+- [ ] Telegram adapter + Chat SDK polling  
+- [ ] Session/debounce handler (minimal port from doze pipeline)  
+- [ ] Spectrum adapter behind `ENABLE_SPECTRUM=false` (no-op)
+
+### Phase 4 — Tools (one commit each)
+
 - [ ] `saveMemory` + `searchMemory`  
-- [ ] `suggestPlan` (mock)  
-- [ ] `pickRestaurant` / dice  
-- [ ] `fortuneCookie`  
-- [ ] `moodPlaylist` stub  
-- [ ] `generatePoster`  
-- [ ] `roastOutfit` (multimodal)  
-- [ ] (stretch) `generateCollage`  
+- [ ] `manageList`  
+- [ ] `searchProducts`  
+- [ ] `searchOutdoze` (staging base URL)  
+- [ ] Fun tools: poster, pickRestaurant, fortuneCookie, moodPlaylist, roastOutfit
 
-### Phase 4 — UI & demo polish
+### Phase 5 — Outdoze staging
 
-- [ ] `public/index.html` chat UI  
-- [ ] Image upload → attachments in request  
-- [ ] Serve artifact URLs or base64 inline  
-- [ ] README run instructions  
+- [ ] Pin `OUTDOZE_API_BASE_URL` to staging deploy  
+- [ ] Verify against outdoze `todo.md` mock routes  
+- [ ] Rehearse Telegram demo script
 
-### Phase 5 — Hardening
+### Phase 6 — Hardening
 
-- [ ] Basic error handling in agent (friendly fallback string)  
 - [ ] `pnpm typecheck` clean  
-- [ ] Rehearse 60s demo script  
+- [ ] Friendly agent error fallback  
+- [ ] No secrets in git
 
 ---
 
 ## Environment variables
 
+Secrets live in **`.env.local`** (gitignored) and optionally `.env` for local overrides. Document placeholders in **`.env.example`** only.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GOOGLE_VERTEX_API_KEY` | Yes (v0 path) | Vertex API key for `@ai-sdk/google-vertex` (matches doze `agent.ts` apiKey style). |
-| `GOOGLE_VERTEX_PROJECT_ID` | If using ADC | Project id if switching from API key to service account. |
-| `GOOGLE_VERTEX_CLIENT_EMAIL` | Optional | Service account email (production-style auth). |
-| `GOOGLE_VERTEX_PRIVATE_KEY` | Optional | PEM private key (`\n` escaped in .env). |
-| `VERTEX_MODEL` | Optional | Default e.g. `gemini-2.0-flash` or team’s preview id. |
-| `SERVER_PORT` | Optional | Default `4000`. |
-| `ARTIFACT_DIR` | Optional | Default `/tmp/doze-test-artifacts` for posters. |
-| `SUPERMEMORY_API_KEY` | No (v0) | Only if wiring real Supermemory instead of in-memory. |
+| `GOOGLE_VERTEX_API_KEY` | Yes | Vertex / Gemini via `@ai-sdk/google-vertex` |
+| `VERTEX_MODEL` | Optional | Default e.g. `gemini-2.0-flash` or team preview id |
+| `SERVER_PORT` | Optional | Default `4000` |
+| `TELEGRAM_BOT_TOKEN` | Yes (demo) | From @BotFather |
+| `SUPERMEMORY_API_KEY` | Yes | **Same key / project as doze** |
+| `PERPLEXITY_API_KEY` | Yes | For `searchProducts` |
+| `OUTDOZE_API_BASE_URL` | Yes | **Staging** base URL (no trailing slash); not prod marketing site |
+| `OUTDOZE_API_KEY` | Optional | If staging routes add auth |
+| `ENABLE_SPECTRUM` | Optional | `false` default; `true` only when Spectrum credentials ready |
+| `SPECTRUM_*` / iMessage | Optional | Post-v0; unused when `ENABLE_SPECTRUM=false` |
+| `ARTIFACT_DIR` | Optional | Poster output, default `/tmp/doze-test-artifacts` |
 
-Never commit `.env`. Document all keys in `.env.example` with placeholder values only.
+Never commit `.env`, `.env.local`, or API keys.
 
 ---
 
-## 60-second demo script
+## Telegram demo script (~60s)
 
-1. **Open** `http://localhost:4000` — show simple chat UI.  
-2. **Say:** “Remember my name is Alex and I’m vegetarian.” → watch **`saveMemory`**.  
-3. **Ask:** “Add oat milk to my groceries list.” → **`manageList`**.  
-4. **Ask:** “We can’t pick dinner — surprise me, Japanese, San Francisco vibe.” → **`pickRestaurant`**.  
-5. **Ask:** “Make a poster for ‘Build Night Pizza’ — retro neon vibe.” → **`generatePoster`**, show image.  
-6. **Upload** a outfit photo: “Roast my fit for build night.” → **`roastOutfit`** / multimodal reply.  
-7. **Close:** “Fortune cookie before we ship?” → **`fortuneCookie`**.  
+1. **Open** Telegram bot — introduce Doze-test concierge.  
+2. **Say:** “Remember my name is Alex and I hate crowded spots.” → **`saveMemory`**.  
+3. **Ask:** “Add sunscreen to my beach list.” → **`manageList`**.  
+4. **Ask:** “Find rooftop lounges in Accra under ₵200” → **`searchOutdoze`** (staging).  
+5. **Ask:** “What’s trending for date night restaurants in East Legon?” → **`searchProducts`** if Outdoze slice is thin.  
+6. **Ask:** “We can’t pick dinner — surprise us, Japanese vibe.” → **`pickRestaurant`**.  
+7. **Ask:** “Poster for ‘Outdoze Night’ neon vibe.” → **`generatePoster`**, send image in chat.  
+8. **Photo +** “Roast my fit.” → **`roastOutfit`**.  
+9. **Close:** “Fortune cookie?” → **`fortuneCookie`**.
 
-Backup if image gen fails: lean on **`fortuneCookie`**, **`moodPlaylist`**, and **`suggestPlan`**.
+Backup: **`moodPlaylist`**, local `POST /api/chat` UI if Telegram flakes.
 
 ---
 
@@ -274,23 +255,31 @@ Backup if image gen fails: lean on **`fortuneCookie`**, **`moodPlaylist`**, and 
 
 | Risk | Mitigation |
 |------|------------|
-| Vertex quota / model id drift | Pin model in env; test key before demo; fallback message in `agent.ts` catch block (doze pattern). |
-| Image tool latency | Generate poster earlier in script; keep collage as stretch. |
-| Accidentally copying secrets | Only `.env.example` in repo; use commit farm to review diffs. |
-| Scope creep into Sunday bridge | Any iMessage/Spectrum code is a hard no for v0. |
-| `exactOptionalPropertyTypes` / strict TS | Match doze tsconfig strictness early to avoid end-of-night type fires. |
-| Multimodal size limits | Resize/compress uploads in UI before base64 POST. |
-| In-memory memory lost on restart | Accept for demo; mention Supermemory as phase 2. |
+| Staging URL not ready | Ship `searchOutdoze` with clear error text; use `searchProducts` fallback in prompt |
+| Telegram polling conflicts | Single bot token; don’t run doze + doze-test against same token simultaneously |
+| Supermemory quota | Same project as doze — monitor usage |
+| Spectrum scope creep | Keep `ENABLE_SPECTRUM=false`; document post-v0 |
+| Accidental prod Outdoze | Code review `OUTDOZE_API_BASE_URL`; block prod host in dev guard optional |
+| Vertex model id drift | Pin `VERTEX_MODEL` in `.env.local` |
 
 ---
 
 ## Success criteria
 
-- Express serves UI + **`POST /api/chat`** with Vertex agent loop.  
-- **7 tools** registered and demonstrably invoked in the demo script.  
-- **Commit farm** history shows incremental features.  
-- No secrets in git; judges can clone and run with their own Vertex key.
+- Telegram ingress delivers messages to `runAgentTurn` and replies in-thread.  
+- Core tools + Outdoze HTTP tool demonstrably invoked in demo.  
+- Supermemory reads/writes use **doze’s** Supermemory project.  
+- Commit farm history shows incremental features.  
+- No secrets in git; Spectrum not required for “done.”
 
 ---
 
-*Last updated: build night — consolidated from Sunday/Doze research and final user decisions (public repo, Express, fun tools, commit farm).*
+## Open questions
+
+1. **Spectrum vs skip:** Conflicting survey answers — **Telegram wins for v0**; Spectrum optional post-v0. Confirm with team before promising iMessage on stage.  
+2. **Exact staging hostname:** Replace placeholder in `OUTDOZE_API_BASE_URL` when Vercel preview / staging deploy is chosen.  
+3. **Outdoze mock routes:** See `bernoullithedev/outdoze` **`todo.md`** — implement `GET /api/places/search`, detail, checkout mock if not already stable on staging branch.
+
+---
+
+*Last updated: post-planning survey — Telegram required, Spectrum deferred, Outdoze staging HTTP, Supermemory shared with doze, browse disabled, Perplexity search kept.*
