@@ -5,7 +5,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 
 const VAPI_BASE = "https://api.vapi.ai";
-const HARDCODED_RECIPIENT = "+19095069035";
+const HARDCODED_RECIPIENT = "+233598759502";
 
 function getVapiConfig() {
   return {
