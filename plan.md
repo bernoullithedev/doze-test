@@ -14,21 +14,23 @@
 **Story for judges:**
 
 1. *“This is Doze narrowed to the demo surface: Telegram ingress, Vertex tool calling, Supermemory shared with our production Doze project, and Outdoze staging instead of browser automation.”*
-2. *“We deliberately skipped Spectrum/iMessage for v0 — adapter code can land later without blocking the demo.”*
+2. *“Spectrum/iMessage is out of scope for this hackathon — v0 is Telegram-only so we ship the agent and Outdoze story without bridge work.”*
 3. *“Watch it remember you, manage a list, search products via Perplexity, pull places from Outdoze, and run the fun tools (poster, restaurant picker, fortune, playlist, outfit roast).”*
 
-**Non-goals for v0:** Stagehand `browse-website` / DoorDash checkout flows, Partiful, Vapi calls, Stripe payments, prod Outdoze traffic, Spectrum/iMessage **enabled** in production config.
+**Non-goals for v0:** Stagehand `browse-website` / DoorDash checkout flows, Partiful, Vapi calls, Stripe payments, prod Outdoze traffic, **Spectrum/iMessage ingress** (any setup, adapters, or env for the hackathon).
 
 ---
 
-## Ingress: Telegram vs Spectrum (resolved)
+## Messaging ingress (v0)
 
-| Channel | v0 status | Notes |
-|---------|-----------|--------|
-| **Telegram** | **Required** | Port `doze/src/ingress/telegram-adapter.ts` + Chat SDK `createTelegramAdapter` polling from `doze/src/index.ts`. Demo script assumes Telegram DMs. |
-| **Spectrum / iMessage** | **Post-v0 / optional** | User initially asked for **both** channels, but also selected **`skip_spectrum`** for spectrum setup. **Resolution:** do **not** block the build on Spectrum. Copy `spectrum-adapter.ts` and Spectrum bootstrap into a feature-flagged or commented path (`ENABLE_SPECTRUM=false` default) so it can be enabled later without shipping iMessage for the hackathon. |
+**Telegram only** for the hackathon. Demo script and success criteria assume Telegram DMs. Optional browser `POST /api/chat` is for local debugging only.
 
-**Open question (documented):** If judges expect iMessage, clarify that v0 is Telegram-first; Spectrum is staged behind env flag.
+| Channel | Hackathon (v0) |
+|---------|----------------|
+| **Telegram** | **In scope** | Port `doze/src/ingress/telegram-adapter.ts` + Chat SDK `createTelegramAdapter` polling from `doze/src/index.ts`. |
+| **Spectrum / iMessage** | **Out of scope** | Confirmed **`skip_spectrum`**; not planned for this repo during the hackathon. No adapter copy, feature flags, or phased tasks. *Future:* may live in private **doze** / Sunday bridge patterns, not doze-test v0. |
+
+If judges ask about iMessage: v0 is Telegram-only by design.
 
 ---
 
@@ -63,7 +65,6 @@
 | `src/routes/chat.ts` | `POST /api/chat` — same contract as doze for local UI / tests. |
 | `src/agent.ts` | `runAgentTurn` — port from `doze/src/agent.ts`. |
 | `src/ingress/telegram-adapter.ts` | Map Telegram payloads → `IncomingChatMessage`. |
-| `src/ingress/spectrum-adapter.ts` | **Copied, disabled by default** (`ENABLE_SPECTRUM`). |
 | `src/env.ts` | Load `.env` / `.env.local` locally only. |
 | `src/memory.ts` | **Supermemory** — same API key / project as doze (`SUPERMEMORY_API_KEY`). |
 | `src/tools/outdoze-client.ts` | `fetch` wrapper for staging Outdoze routes (see outdoze `todo.md`). |
@@ -133,12 +134,12 @@ Register incrementally in `src/tools/index.ts` (one commit per tool where possib
 | `src/tools/save-memory.ts`, `search-memory.ts`, `manage-list.ts`, `search-products.ts` | Core tools |
 | `src/tools/generate-poster.ts` | Fun + attachments |
 | `src/ingress/telegram-adapter.ts` | Telegram mapping |
-| `src/ingress/spectrum-adapter.ts` | Copy only; **disabled** v0 |
+| `src/ingress/spectrum-adapter.ts` | **Future** - not ported for hackathon (see ingress section). |
 | `src/index.ts` | Trim to Telegram + Express routes; omit WhatsApp |
 | `src/prompt/*`, `src/attachments.ts` | If multimodal / multi-bubble replies needed |
 | `src/prompts/system.ts` | Shorten; document Outdoze + Telegram |
 
-**Do not port:** `browse-website.ts`, `make-call.ts`, `process-payment.ts`, `create-event-partiful.ts`, full Spectrum provider boot unless `ENABLE_SPECTRUM=true`.
+**Do not port:** `browse-website.ts`, `make-call.ts`, `process-payment.ts`, `create-event-partiful.ts`, `spectrum-adapter.ts`, Spectrum/iMessage bootstrap.
 
 **Sunday monorepo:** Reference only for bridge/agent MCP patterns — **not** ported for this repo.
 
@@ -189,7 +190,6 @@ chore: document env in .env.example
 
 - [ ] Telegram adapter + Chat SDK polling  
 - [ ] Session/debounce handler (minimal port from doze pipeline)  
-- [ ] Spectrum adapter behind `ENABLE_SPECTRUM=false` (no-op)
 
 ### Phase 4 — Tools (one commit each)
 
@@ -227,8 +227,6 @@ Secrets live in **`.env.local`** (gitignored) and optionally `.env` for local ov
 | `PERPLEXITY_API_KEY` | Yes | For `searchProducts` |
 | `OUTDOZE_API_BASE_URL` | Yes | **Staging** base URL (no trailing slash); not prod marketing site |
 | `OUTDOZE_API_KEY` | Optional | If staging routes add auth |
-| `ENABLE_SPECTRUM` | Optional | `false` default; `true` only when Spectrum credentials ready |
-| `SPECTRUM_*` / iMessage | Optional | Post-v0; unused when `ENABLE_SPECTRUM=false` |
 | `ARTIFACT_DIR` | Optional | Poster output, default `/tmp/doze-test-artifacts` |
 
 Never commit `.env`, `.env.local`, or API keys.
@@ -258,7 +256,6 @@ Backup: **`moodPlaylist`**, local `POST /api/chat` UI if Telegram flakes.
 | Staging URL not ready | Ship `searchOutdoze` with clear error text; use `searchProducts` fallback in prompt |
 | Telegram polling conflicts | Single bot token; don’t run doze + doze-test against same token simultaneously |
 | Supermemory quota | Same project as doze — monitor usage |
-| Spectrum scope creep | Keep `ENABLE_SPECTRUM=false`; document post-v0 |
 | Accidental prod Outdoze | Code review `OUTDOZE_API_BASE_URL`; block prod host in dev guard optional |
 | Vertex model id drift | Pin `VERTEX_MODEL` in `.env.local` |
 
@@ -270,16 +267,15 @@ Backup: **`moodPlaylist`**, local `POST /api/chat` UI if Telegram flakes.
 - Core tools + Outdoze HTTP tool demonstrably invoked in demo.  
 - Supermemory reads/writes use **doze’s** Supermemory project.  
 - Commit farm history shows incremental features.  
-- No secrets in git; Spectrum not required for “done.”
+- No secrets in git; Telegram-only ingress defines “done.” for v0.
 
 ---
 
 ## Open questions
 
-1. **Spectrum vs skip:** Conflicting survey answers — **Telegram wins for v0**; Spectrum optional post-v0. Confirm with team before promising iMessage on stage.  
-2. **Exact staging hostname:** Replace placeholder in `OUTDOZE_API_BASE_URL` when Vercel preview / staging deploy is chosen.  
-3. **Outdoze mock routes:** See `bernoullithedev/outdoze` **`todo.md`** — implement `GET /api/places/search`, detail, checkout mock if not already stable on staging branch.
+1. **Exact staging hostname:** Replace placeholder in `OUTDOZE_API_BASE_URL` when Vercel preview / staging deploy is chosen.  
+2. **Outdoze mock routes:** See `bernoullithedev/outdoze` **`todo.md`** — implement `GET /api/places/search`, detail, checkout mock if not already stable on staging branch.
 
 ---
 
-*Last updated: post-planning survey — Telegram required, Spectrum deferred, Outdoze staging HTTP, Supermemory shared with doze, browse disabled, Perplexity search kept.*
+*Last updated: Telegram-only ingress for hackathon v0; Spectrum out of scope; Outdoze staging HTTP; Supermemory shared with doze; browse disabled; Perplexity search kept.*
